@@ -1,0 +1,16 @@
+{
+  "description": "Opens the live token panel with each new Claude session, but only when the user has turned autostart on with /tokens-watch auto-on. Silent and a no-op otherwise.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" tokenwatch.py --autostart",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

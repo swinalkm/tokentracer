@@ -1,0 +1,31 @@
+{
+  "name": "token-tracker",
+  "owner": {
+    "name": "Swinal Kamble"
+  },
+  "metadata": {
+    "description": "Local-first token and cost accounting for Claude, with a live desktop panel.",
+    "version": "1.1.0"
+  },
+  "plugins": [
+    {
+      "name": "claude-token-tracker",
+      "source": "./",
+      "description": "Watch your Claude token spend live on a small desktop panel, and see exactly what every turn cost. Reads the transcripts Claude Code, the editor extensions, and Cowork already write on your machine \u2014 nothing leaves your computer.",
+      "version": "1.1.0",
+      "author": {
+        "name": "Swinal Kamble"
+      },
+      "license": "MIT",
+      "keywords": [
+        "tokens",
+        "usage",
+        "cost",
+        "live",
+        "monitor",
+        "desktop",
+        "dashboard"
+      ]
+    }
+  ]
+}

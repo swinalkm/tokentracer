@@ -1,0 +1,35 @@
+{
+  "_comment": "USD per million tokens. Source: https://platform.claude.com/docs/en/about-claude/pricing (checked 2026-09-09). Edit this file if prices change; the script reads it at runtime.",
+  "_checked": "2026-09-09",
+  "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "web_search_per_1k_requests": 10.0,
+  "models": {
+    "claude-fable-5-1":   {"label": "Fable 5.1",  "input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 0.25, "output": 50.0},
+    "claude-mythos-5-1":  {"label": "Mythos 5.1", "input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 0.25, "output": 50.0},
+    "claude-fable-5":     {"label": "Fable 5",    "input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 1.00, "output": 50.0},
+    "claude-mythos-5":    {"label": "Mythos 5",   "input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 1.00, "output": 50.0},
+    "claude-opus-5":      {"label": "Opus 5",     "input": 5.0,  "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.50, "output": 25.0},
+    "claude-opus-4-8":    {"label": "Opus 4.8",   "input": 5.0,  "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.50, "output": 25.0},
+    "claude-opus-4-7":    {"label": "Opus 4.7",   "input": 5.0,  "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.50, "output": 25.0},
+    "claude-opus-4-6":    {"label": "Opus 4.6",   "input": 5.0,  "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.50, "output": 25.0},
+    "claude-opus-4-5":    {"label": "Opus 4.5",   "input": 5.0,  "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.50, "output": 25.0},
+    "claude-opus-4-1":    {"label": "Opus 4.1",   "input": 15.0, "cache_write_5m": 18.75, "cache_write_1h": 30.0, "cache_read": 1.50, "output": 75.0},
+    "claude-opus-4":      {"label": "Opus 4",     "input": 15.0, "cache_write_5m": 18.75, "cache_write_1h": 30.0, "cache_read": 1.50, "output": 75.0},
+    "claude-sonnet-5":    {"label": "Sonnet 5",   "input": 2.0,  "cache_write_5m": 2.50,  "cache_write_1h": 4.0,  "cache_read": 0.20, "output": 10.0},
+    "claude-sonnet-4-6":  {"label": "Sonnet 4.6", "input": 3.0,  "cache_write_5m": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.30, "output": 15.0},
+    "claude-sonnet-4-5":  {"label": "Sonnet 4.5", "input": 3.0,  "cache_write_5m": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.30, "output": 15.0},
+    "claude-sonnet-4":    {"label": "Sonnet 4",   "input": 3.0,  "cache_write_5m": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.30, "output": 15.0},
+    "claude-haiku-4-5":   {"label": "Haiku 4.5",  "input": 1.0,  "cache_write_5m": 1.25,  "cache_write_1h": 2.0,  "cache_read": 0.10, "output": 5.0},
+    "claude-haiku-3-5":   {"label": "Haiku 3.5",  "input": 0.80, "cache_write_5m": 1.00,  "cache_write_1h": 1.60, "cache_read": 0.08, "output": 4.0}
+  },
+  "modifiers": {
+    "_comment": "Applied on top of base rates when the turn records them.",
+    "fast_mode": {
+      "_comment": "Opus 5 / 4.8 with speed=fast are billed at $10 input / $50 output per MTok.",
+      "claude-opus-5":   {"input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 1.00, "output": 50.0},
+      "claude-opus-4-8": {"input": 10.0, "cache_write_5m": 12.50, "cache_write_1h": 20.0, "cache_read": 1.00, "output": 50.0}
+    },
+    "inference_geo_us_multiplier": 1.1,
+    "batch_multiplier": 0.5
+  }
+}
