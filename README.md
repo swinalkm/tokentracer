@@ -132,7 +132,7 @@ That gap is real and this plugin states it on every report rather than quietly u
 Inside Claude Code, on every platform, it is these two lines:
 
 ```
-/plugin marketplace add swinalkamble/claude-token-tracker
+/plugin marketplace add https://github.com/swinalkm/tokentracer.git
 /plugin install claude-token-tracker@token-tracker
 ```
 
