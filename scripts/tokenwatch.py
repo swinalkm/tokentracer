@@ -5,7 +5,7 @@ as it happens.
 
 It tails the JSONL transcripts that Claude Code (terminal), the VS Code and
 JetBrains extensions, Cowork and the Agent SDK append while they work, prices
-every turn from pricing.json, and repaints a compact widget that sits on your
+every turn at live list prices, and repaints a compact widget that sits on your
 desktop. Turns are counted the moment they land — including the ones Claude
 takes on its own in the middle of a long task, and subagent turns.
 
@@ -42,11 +42,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import copilot_usage  # noqa: E402
 from token_report import (  # noqa: E402  (path juggling has to come first)
     DEFAULT_PRICING,
+    Linker,
     Pricing,
     Turn,
     discover_roots,
+    add_turn,
+    blank_bucket,
+    fmt_cost,
+    fmt_credits,
+    tool_split,
     fmt_money,
     fmt_tokens,
     row_dedupe_key,
@@ -64,10 +71,12 @@ SCOPE_SPECS = (
     ("1h",      "LAST HOUR",       "1h",   3600),
     ("3h",      "LAST 3 HOURS",    "3h",   10800),
     ("24h",     "LAST 24 HOURS",   "24h",  86400),
-    ("today",   "TODAY",           "day",  "today"),
-    ("session", "THIS SESSION",    "sess", "session"),
-    ("window",  "WHOLE WINDOW",    "all",  "window"),
+    ("7d",      "LAST 7 DAYS",     "7d",   7 * 86400),
+    # Everything on record, back to the first turn of any model or tool. On
+    # the panel this chip opens the full dashboard in the browser instead.
+    ("all",     "ALL TIME",        "all ↗", "all"),
 )
+DEFAULT_SCOPE = "24h"
 SCOPES = tuple(spec[0] for spec in SCOPE_SPECS)
 SCOPE_LABELS = {spec[0]: spec[1] for spec in SCOPE_SPECS}
 SCOPE_CHIPS = {spec[0]: spec[2] for spec in SCOPE_SPECS}
@@ -76,7 +85,7 @@ SPARK_BARS = 34
 MODEL_ROWS = 3
 LIVE_SECONDS = 25          # a turn this recent means "live"
 FOCUS_SECONDS = 300        # how far back to look for the session in use
-DEFAULT_WINDOW_DAYS = 7    # how much history the panel holds in memory
+DEFAULT_WINDOW_DAYS = 0    # history held in memory; 0 = all of it, for "all"
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +121,7 @@ def _log(message: str) -> None:
 DEFAULT_STATE = {
     "x": None,
     "y": None,
-    "scope": "today",
+    "scope": DEFAULT_SCOPE,
     "collapsed": False,
     "topmost": True,
     "autostart": False,
@@ -156,11 +165,18 @@ class Watcher:
 
     def __init__(self, roots: list[Path], pricing: Pricing,
                  include_sidechains: bool = True,
-                 window_days: int = DEFAULT_WINDOW_DAYS):
+                 window_days: int = DEFAULT_WINDOW_DAYS,
+                 include_copilot: bool = True):
         self.roots = roots
+        self.include_copilot = include_copilot
+        # Copilot logs are edits to a session object, not appended turns, so
+        # they are re-read whole when they change rather than tailed.
+        self.copilot_files: list[tuple[Path, str]] = []
+        self.copilot_mtimes: dict[Path, float] = {}
+        self.linker = Linker()      # places each call in its loop / agent
         self.pricing = pricing
         self.include_sidechains = include_sidechains
-        self.window_days = max(1, window_days)
+        self.window_days = max(0, window_days)
         self.offsets: dict[Path, int] = {}
         self.seen: set[str] = set()
         self.turns: list[Turn] = []
@@ -170,14 +186,23 @@ class Watcher:
 
     # -- window ----------------------------------------------------------- #
 
-    def window_start(self) -> dt.datetime:
+    def window_start(self) -> dt.datetime | None:
+        """Oldest moment held in memory, or None when all history is kept."""
+        if not self.window_days:
+            return None
         now = dt.datetime.now().astimezone()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return midnight - dt.timedelta(days=self.window_days - 1)
 
+    def first_seen(self) -> dt.datetime | None:
+        """The earliest turn held: the day usage began, when all is kept."""
+        return next((t.ts for t in self.turns if t.ts), None)
+
     def _trim(self) -> None:
         """Drop turns that have aged out, so a long-running panel stays small."""
         cutoff = self.window_start()
+        if cutoff is None:
+            return
         if self.turns and self.turns[0].ts and self.turns[0].ts >= cutoff:
             return
         self.turns = [t for t in self.turns if t.ts is None or t.ts >= cutoff]
@@ -220,7 +245,7 @@ class Watcher:
         text = chunk[:cut].decode("utf-8", "replace")
         return [line for line in text.split("\n") if line.strip()]
 
-    def _ingest(self, lines: list[str], fallback_session: str,
+    def _ingest(self, lines: list[str], path: Path,
                 cutoff: dt.datetime | None) -> list[Turn]:
         fresh: list[Turn] = []
         for line in lines:
@@ -228,20 +253,24 @@ class Watcher:
                 row = json.loads(line)
             except (ValueError, TypeError):
                 continue
+            if not isinstance(row, dict):
+                continue
+            loop = self.linker.observe(row, path)
             usage = row_usage(row)
             if usage is None:
                 continue
             key = row_dedupe_key(row)
             if key:
                 if key in self.seen:
+                    self.linker.merge(key, row)
                     continue
                 self.seen.add(key)
             if row.get("isSidechain") and not self.include_sidechains:
                 continue
-            turn = turn_from_row(
+            turn = self.linker.annotate(turn_from_row(
                 row, usage, self.pricing, use_utc=False,
-                fallback_session=fallback_session,
-            )
+                fallback_session=path.stem,
+            ), row, path, loop, key)
             if cutoff is not None and turn.ts is not None and turn.ts < cutoff:
                 continue
             fresh.append(turn)
@@ -254,7 +283,7 @@ class Watcher:
         they are skipped and simply marked as read.
         """
         cutoff = self.window_start()
-        cutoff_epoch = cutoff.timestamp()
+        cutoff_epoch = cutoff.timestamp() if cutoff else None
         self.files = self._discover()
         loaded: list[Turn] = []
         for path in sorted(self.files):
@@ -262,33 +291,70 @@ class Watcher:
                 stat = path.stat()
             except OSError:
                 continue
-            if stat.st_mtime < cutoff_epoch:
+            if cutoff_epoch is not None and stat.st_mtime < cutoff_epoch:
                 self.offsets[path] = stat.st_size     # read, but not parsed
                 continue
             loaded.extend(self._ingest(
-                self._new_lines(path), path.stem, cutoff
+                self._new_lines(path), path, cutoff
             ))
+        loaded.extend(self._copilot_changes(cutoff, discover=True))
         loaded.sort(key=lambda t: t.ts or dt.datetime.min.replace(
             tzinfo=dt.timezone.utc))
         self.turns = loaded
         self.last_scan = time.time()
         return len(loaded)
 
+    def _copilot_changes(self, cutoff: dt.datetime | None,
+                         discover: bool = False) -> list[Turn]:
+        """New Copilot requests from chat logs that changed since last read."""
+        if not self.include_copilot:
+            return []
+        if discover or not self.copilot_files:
+            self.copilot_files = copilot_usage.session_files()
+        cutoff_epoch = cutoff.timestamp() if cutoff else None
+        fresh: list[Turn] = []
+        for path, editor in self.copilot_files:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if self.copilot_mtimes.get(path) == mtime:
+                continue
+            self.copilot_mtimes[path] = mtime
+            if cutoff_epoch is not None and mtime < cutoff_epoch:
+                continue
+            for turn in copilot_usage.turns_from_file(
+                    path, editor, self.pricing, use_utc=False,
+                    include_sidechains=self.include_sidechains):
+                if turn.request_id in self.seen:
+                    continue
+                if cutoff is not None and turn.ts is not None and turn.ts < cutoff:
+                    continue
+                self.seen.add(turn.request_id)
+                fresh.append(turn)
+        return fresh
+
     def poll(self, rescan_every: float = 5.0) -> list[Turn]:
         """Read whatever has been appended since the last call."""
         now = time.time()
-        if now - self.last_scan >= rescan_every or not self.files:
+        rescan = now - self.last_scan >= rescan_every or not self.files
+        if rescan:
             self.files = self._discover()
             self.last_scan = now
         fresh: list[Turn] = []
         for path in self.files:
             lines = self._new_lines(path)
             if lines:
-                fresh.extend(self._ingest(lines, path.stem, None))
+                fresh.extend(self._ingest(lines, path, None))
+        fresh.extend(self._copilot_changes(self.window_start(), discover=rescan))
         if fresh:
             fresh.sort(key=lambda t: t.ts or dt.datetime.min.replace(
                 tzinfo=dt.timezone.utc))
             self.turns.extend(fresh)
+            # A Copilot request is logged when it finishes, so it can land
+            # behind a turn already read; keep the list in time order.
+            self.turns.sort(key=lambda t: t.ts or dt.datetime.min.replace(
+                tzinfo=dt.timezone.utc))
             self._trim()
         return fresh
 
@@ -301,17 +367,9 @@ class Watcher:
         return None
 
     def _scope_turns(self, scope: str) -> list[Turn]:
-        rule = SCOPE_RULES.get(scope, "today")
-        if rule == "window":
+        rule = SCOPE_RULES.get(scope, SCOPE_RULES[DEFAULT_SCOPE])
+        if rule == "all":
             return self.turns
-        if rule == "session":
-            session = self.active_session()
-            if not session:
-                return []
-            return [t for t in self.turns if t.session == session]
-        if rule == "today":
-            today = dt.datetime.now().astimezone().date()
-            return [t for t in self.turns if t.ts and t.ts.date() == today]
         # A rolling window, counted back from now.
         cutoff = dt.datetime.now().astimezone() - dt.timedelta(seconds=rule)
         return [t for t in self.turns if t.ts and t.ts >= cutoff]
@@ -330,8 +388,18 @@ class Watcher:
                 )
         return saved
 
-    def snapshot(self, scope: str = "today") -> dict:
-        scope = scope if scope in SCOPES else "today"
+    def scope_label(self, scope: str) -> str:
+        """ "ALL TIME" names the day it starts from: the first turn on record,
+        or the start of the history held when --days caps it."""
+        if scope != "all":
+            return SCOPE_LABELS[scope]
+        if self.window_days:
+            return f"LAST {self.window_days} DAYS"
+        first = self.first_seen()
+        return f"SINCE {first.strftime('%d %b %Y').upper()}" if first else "ALL TIME"
+
+    def snapshot(self, scope: str = DEFAULT_SCOPE) -> dict:
+        scope = scope if scope in SCOPES else DEFAULT_SCOPE
         turns = self._scope_turns(scope)
         now = dt.datetime.now().astimezone()
 
@@ -339,10 +407,9 @@ class Watcher:
             "tokens": 0, "cost": 0.0, "input": 0, "output": 0, "thinking": 0,
             "cache_read": 0, "cache_write": 0, "unpriced": 0,
             "sidechain_turns": 0, "sidechain_cost": 0.0,
+            "copilot_turns": 0, "credits": 0.0, "credit_turns": 0,
         }
-        models: dict[str, dict] = defaultdict(
-            lambda: {"tokens": 0, "cost": 0.0, "turns": 0}
-        )
+        models: dict[str, dict] = defaultdict(blank_bucket)
         sessions: set[str] = set()
 
         for turn in turns:
@@ -354,6 +421,11 @@ class Watcher:
             agg["cache_read"] += turn.cache_read or 0
             agg["cache_write"] += (turn.cache_write_5m or 0) + \
                                   (turn.cache_write_1h or 0)
+            if turn.via == "Copilot":
+                agg["copilot_turns"] += 1
+                if turn.credits is not None:
+                    agg["credits"] += turn.credits
+                    agg["credit_turns"] += 1
             if not turn.priced:
                 agg["unpriced"] += 1
             if turn.is_sidechain:
@@ -361,14 +433,14 @@ class Watcher:
                 agg["sidechain_cost"] += turn.cost or 0.0
             if turn.session:
                 sessions.add(turn.session)
-            bucket = models[turn.model_label or "unknown"]
-            bucket["tokens"] += turn.raw_total or 0
-            bucket["cost"] += turn.cost or 0.0
-            bucket["turns"] += 1
+            add_turn(models[turn.model_label or "unknown"], turn)
 
         ranked = sorted(
-            ({"label": k, **v} for k, v in models.items()),
-            key=lambda m: (-m["cost"], -m["tokens"]),
+            ({"label": k, "tokens": v["raw_total"],
+              **{f: v[f] for f in ("cost", "turns", "unpriced", "copilot_turns",
+                                   "credits", "credit_turns")}}
+             for k, v in models.items()),
+            key=lambda m: (-m["tokens"]),
         )
 
         # Which session is actually doing the work. Naming the *last* turn's
@@ -410,7 +482,10 @@ class Watcher:
                 "project": last.project or "",
                 "session": last.session or "",
                 "sidechain": bool(last.is_sidechain),
+                "agent": last.agent or "",
                 "priced": bool(last.priced),
+                "credits": last.credits,
+                "mode": last.mode or "",
             }
 
         span = ""
@@ -422,8 +497,7 @@ class Watcher:
 
         return {
             "scope": scope,
-            "scope_label": (f"LAST {self.window_days} DAYS"
-                            if scope == "window" else SCOPE_LABELS[scope]),
+            "scope_label": self.scope_label(scope),
             "turns": len(turns),
             "sessions": len(sessions),
             "span": span,
@@ -436,6 +510,8 @@ class Watcher:
             "idle_seconds": idle,
             "live": idle is not None and idle <= LIVE_SECONDS,
             "tracked_turns": len(self.turns),
+            "tool_split": tool_split(turns),
+            "usd_per_credit": self.pricing.copilot_usd_per_credit,
             "errors": self.errors,
             **agg,
         }
@@ -519,7 +595,10 @@ class Panel:
         self.state = state
         self.args = args
         self.interval = max(250, int(args.interval * 1000))
-        self.scope = state.get("scope") if state.get("scope") in SCOPES else "today"
+        # A scope saved by an older version (today, session, window) falls
+        # back, and so does "all", which the panel shows in the browser.
+        saved = state.get("scope")
+        self.scope = saved if saved in SCOPES and saved != "all" else DEFAULT_SCOPE
         self.collapsed = bool(state.get("collapsed"))
         self.topmost = bool(state.get("topmost", True))
         self._flash_job = None
@@ -653,7 +732,7 @@ class Panel:
         hero.pack(fill="x", pady=(8, 0))
         self.hero_tokens = self._text(hero, "0", self.f_hero, TEXT)
         self.hero_tokens.pack(side="left")
-        self.hero_cost = self._text(hero, "$0.00", self.f_hero, ACCENT,
+        self.hero_cost = self._text(hero, "", self.f_hero, ACCENT,
                                     anchor="e")
         self.hero_cost.pack(side="right")
 
@@ -662,7 +741,7 @@ class Panel:
         self.scope_label = self._text(legend, "TODAY", self.f_caps, DIM,
                                       cursor="hand2")
         self.scope_label.pack(side="left")
-        self.hero_hint = self._text(legend, "tokens · cost", self.f_caps,
+        self.hero_hint = self._text(legend, "tokens · cost (USD)", self.f_caps,
                                     DIM, anchor="e")
         self.hero_hint.pack(side="right")
         for widget in (self.scope_label, self.hero_tokens, self.hero_cost):
@@ -729,7 +808,7 @@ class Panel:
     def _build_menu(self):
         menu = self.tk.Menu(self.root, tearoff=0)
         for key in SCOPES:
-            label = (f"Last {self.watcher.window_days} days" if key == "window"
+            label = ("All time — open dashboard in browser…" if key == "all"
                      else SCOPE_LABELS[key].capitalize())
             menu.add_command(label=label,
                              command=lambda k=key: self.set_scope(k))
@@ -847,39 +926,57 @@ class Panel:
         self._apply_topmost()
 
     def set_scope(self, scope: str) -> None:
+        if scope == "all":
+            # All of history is too much for a small panel: it opens the full
+            # dashboard (totals per platform and model, the calendar) instead.
+            self.open_report(all_time=True)
+            return
         if scope in SCOPES:
             self.scope = scope
             self.refresh()
 
     def cycle_scope(self) -> None:
-        self.set_scope(SCOPES[(SCOPES.index(self.scope) + 1) % len(SCOPES)])
+        panel = [k for k in SCOPES if k != "all"]
+        current = panel.index(self.scope) if self.scope in panel else -1
+        self.set_scope(panel[(current + 1) % len(panel)])
 
     def copy_summary(self) -> None:
         snap = self.watcher.snapshot(self.scope)
         lines = [
-            f"Claude tokens — {snap['scope_label'].lower()}",
+            f"Token usage — {snap['scope_label'].lower()}",
             f"  {fmt_tokens(snap['tokens'])} tokens, "
-            f"{fmt_money(snap['cost'])} across {_plural(snap['turns'], 'turn')}",
+            f"{fmt_cost(snap)} (USD) across {_plural(snap['turns'], 'turn')}",
+            f"  {snap['tool_split']}",
         ]
         for model in snap["models"]:
             lines.append(f"  {model['label']}: {fmt_tokens(model['tokens'])}, "
-                         f"{fmt_money(model['cost'])}")
-        lines.append(f"  saved by caching: {fmt_money(snap['saved'])}")
-        lines.append("  Cost is an estimate at list API prices.")
+                         f"{fmt_cost(model)}")
+        if snap["turns"] > snap["unpriced"]:
+            lines.append(f"  saved by caching: {fmt_money(snap['saved'])}")
+        lines.append("  All costs in USD: Claude = tokens x Anthropic list prices;")
+        if snap["credit_turns"] and snap.get("usd_per_credit"):
+            lines.append(f"  Copilot = {fmt_credits(snap['credits'])} x "
+                         f"${snap['usd_per_credit']:g} per credit (GitHub).")
+        if snap["unpriced"]:
+            lines.append(f"  {snap['unpriced']} turns have no published price.")
         text = "\n".join(lines)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self._notify("copied to clipboard")
 
-    def open_report(self) -> None:
+    def open_report(self, all_time: bool = False) -> None:
         script = str(SCRIPT_DIR / "token_report.py")
+        window = ["--all"] if all_time else ["--days", "30"]
+        if self.args.no_copilot:
+            window.append("--no-copilot")
         try:
             subprocess.Popen(
-                [sys.executable, script, "--days", "30", "--open"],
+                [sys.executable, script, *window, "--open"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=(os.name != "nt"),
             )
-            self._notify("opening full report…")
+            self._notify("opening all-time dashboard in your browser…"
+                         if all_time else "opening full report…")
         except OSError as exc:
             self._notify(f"could not open report: {exc}")
 
@@ -963,7 +1060,7 @@ class Panel:
 
         # hero
         self.hero_tokens.configure(text=fmt_tokens(snap["tokens"]))
-        self.hero_cost.configure(text=fmt_money(snap["cost"]))
+        self.hero_cost.configure(text=fmt_cost(snap) if snap["turns"] else "")
         self.scope_label.configure(text=snap["scope_label"])
         self._paint_chips()
 
@@ -971,9 +1068,11 @@ class Panel:
         last = snap["last"]
         if last:
             parts = [f"+{fmt_tokens(last['tokens'])}"]
-            parts.append(fmt_money(last["cost"]) if last["priced"] else "unpriced")
+            if last["priced"]:
+                parts.append(fmt_money(last["cost"]))
             if last["sidechain"]:
-                parts.append("subagent")
+                parts.append(f"subagent {last['agent']}"
+                             if last["agent"] not in ("", "subagent") else "subagent")
             # Model last, so it is what gets trimmed if the line is tight.
             parts.append(last["model"])
             self.delta.configure(
@@ -999,9 +1098,9 @@ class Panel:
         for index, (name, toks, cost) in enumerate(self.model_rows):
             if index < len(snap["models"]):
                 model = snap["models"][index]
-                name.configure(text=_ellipsis(model["label"], 16))
+                name.configure(text=_ellipsis(model["label"], 20))
                 toks.configure(text=fmt_tokens(model["tokens"]))
-                cost.configure(text=fmt_money(model["cost"]))
+                cost.configure(text=fmt_cost(model))
             else:
                 name.configure(text="")
                 toks.configure(text="")
@@ -1017,14 +1116,14 @@ class Panel:
 
         # footer
         foot = [_plural(snap["turns"], "turn")]
-        if snap["scope"] != "session" and snap["sessions"] > 1:
+        if snap["sessions"] > 1:
             foot.append(_plural(snap["sessions"], "session"))
         if snap["span"]:
             foot.append(snap["span"])
         if snap["saved"] >= 0.01:
             foot.append(f"cache saved {fmt_money(snap['saved'])}")
         if snap["unpriced"]:
-            foot.append(f"{snap['unpriced']} unpriced")
+            foot.append(f"{snap['unpriced']} no price yet")
         self.footer.configure(text=self._fit(self.footer, " · ".join(foot)))
 
         # Flush the repaint now rather than waiting for the window server to
@@ -1206,6 +1305,8 @@ def _panel_argv(args) -> list[str]:
         passthrough += ["--days", str(args.days)]
     if args.no_subagents:
         passthrough += ["--no-subagents"]
+    if args.no_copilot:
+        passthrough += ["--no-copilot"]
     if args.debug:
         passthrough += ["--debug"]
     if args.pricing != str(DEFAULT_PRICING):
@@ -1408,7 +1509,7 @@ def set_autostart(enabled: bool) -> int:
 
 def build_watcher(args) -> Watcher:
     roots = discover_roots(args.root)
-    if not roots:
+    if not roots and (args.no_copilot or not copilot_usage.session_files()):
         configured = os.environ.get("CLAUDE_CONFIG_DIR")
         looked = (f"{configured.rstrip('/')}/projects (from CLAUDE_CONFIG_DIR)"
                   if configured else "~/.claude/projects")
@@ -1421,6 +1522,7 @@ def build_watcher(args) -> Watcher:
         roots, pricing,
         include_sidechains=not args.no_subagents,
         window_days=args.days,
+        include_copilot=not args.no_copilot,
     )
 
 
@@ -1527,14 +1629,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "borderless panel")
     parser.add_argument("--days", type=int, default=DEFAULT_WINDOW_DAYS,
                         metavar="N",
-                        help=f"days of history to hold in memory "
-                             f"(default {DEFAULT_WINDOW_DAYS})")
+                        help="days of history to hold in memory "
+                             "(default: all of it, so 'all' starts from day one)")
+    parser.add_argument("--no-copilot", action="store_true",
+                        help="leave out GitHub Copilot Chat usage")
     parser.add_argument("--no-subagents", action="store_true",
                         help="exclude subagent (sidechain) turns")
     parser.add_argument("--root", action="append", metavar="DIR",
                         help="transcript directory to watch (repeatable)")
     parser.add_argument("--pricing", metavar="PATH", default=str(DEFAULT_PRICING),
-                        help="rates file (default scripts/pricing.json)")
+                        help="your own rates file (default ~/.claude/token-tracker/pricing.json)")
     parser.add_argument("--debug", action="store_true",
                         help="narrate every tick into "
                              "~/.claude/tokenwatch/tokenwatch.log")
@@ -1587,7 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
         watcher = build_watcher(args)
         watcher.prime()
         print(json.dumps(
-            watcher.snapshot(args.scope or load_state().get("scope", "today")),
+            watcher.snapshot(args.scope or load_state().get("scope", DEFAULT_SCOPE)),
             indent=2, default=str,
         ))
         return 0

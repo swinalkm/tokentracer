@@ -1,6 +1,6 @@
 ---
 description: Show token usage and cost across your local Claude sessions, and open a dashboard
-argument-hint: "[--days N | --today | --all] [--open] [--group-by day|model|surface|session|project|skill|plugin|mcp]"
+argument-hint: "[--days N | --today | --all] [--open] [--group-by day|model|app|agent|surface|mode|session|project|skill|plugin|mcp]"
 allowed-tools: Bash(sh:*), Bash(python:*), Bash(python3:*), Bash(py:*)
 ---
 
@@ -36,4 +36,4 @@ Keep it to a few lines. Do not restate the whole table the script already printe
 Always preserve two caveats when reporting, because leaving them out makes the numbers misleading:
 
 - **claude.ai web, the desktop chat window, and the mobile apps are not included.** They write no transcript to disk and expose no per-conversation usage API. Direct the user to Settings → Usage for those.
-- **Cost is an estimate at list API prices.** On a subscription plan the user is not billed per token, so the figure reads as relative weight, not as an invoice.
+- **Cost is tokens × live list API prices**, and "—" where no rate is published yet. On a subscription plan the user is not billed per token, so the figure reads as relative weight, not as an invoice.

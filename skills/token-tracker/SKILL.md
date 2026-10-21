@@ -5,7 +5,7 @@ description: Report Claude token usage and cost from local transcripts, and run 
 
 # Token tracker
 
-Reports exact per-turn token usage and estimated cost by reading the JSONL transcripts that Claude writes locally, and can keep a live panel on the user's desktop that updates as each turn lands. Everything runs on the user's machine; nothing is uploaded.
+Reports exact per-turn token usage and its cost at live list prices by reading the JSONL transcripts that Claude writes locally, and can keep a live panel on the user's desktop that updates as each turn lands. Everything runs on the user's machine; nothing is uploaded.
 
 Two tools, for two different questions:
 
@@ -20,9 +20,11 @@ Say this plainly whenever you report numbers — omitting it makes the figures m
 
 **Covered, exactly:** Claude Code in the terminal, the VS Code and JetBrains extensions, Cowork, the Agent SDK, and any other surface that writes to `~/.claude/projects/`. Token counts come from the API's own `usage` field, so they are not estimates.
 
+**GitHub Copilot Chat in VS Code / VS Code Insiders** is included, for any model, Claude included. It is read from Copilot's local chat logs. It shows as `Copilot · <model>` (for example `Copilot · Sonnet 4.5`), surface `Copilot · VS Code`, tool `Copilot`, and a mode such as `agent mode · panel`. Its cost is in dollars: the GitHub AI credits Copilot recorded charging × GitHub's published rate (1 AI credit = $0.01 USD, downloaded daily). Copilot logs no per-call prompts or cache figures, so its input count is a floor. All costs are USD. Quote totals with their platform split, for example "Claude Code $23.13 · Copilot $1.40". Copilot in JetBrains, Visual Studio and the Copilot CLI is not covered, because they store no token counts. `--no-copilot` leaves Copilot out.
+
 **Not covered at all:** claude.ai in the browser, the desktop chat window, and the mobile apps. Those keep no transcript on disk and expose no per-conversation usage API. There is no workaround — do not attempt to infer them. Point the user to Settings → Usage.
 
-**Cost is an estimate** at list API prices from `scripts/pricing.json`. On a Pro, Max, Team, or Enterprise subscription the user is not billed per token, so present cost as relative weight rather than an amount owed. Only on API/Console billing does it approximate a real charge.
+**Cost is tokens × live list prices.** Rates are downloaded daily from Anthropic's pricing page, and from the public LiteLLM list for other models. The user's own `~/.claude/token-tracker/pricing.json` takes priority over both. Nothing is hard-coded or estimated. A turn whose rates are unknown shows "—", and a total that leaves such turns out ends in "+". On a Pro, Max, Team, or Enterprise subscription the user is not billed per token, so present cost as relative weight rather than an amount owed. Only on API/Console billing does it approximate a real charge.
 
 ## The live panel
 
@@ -50,9 +52,10 @@ Things worth knowing when the user asks:
   `~/Applications` so it can be launched from Spotlight with no terminal.
 - **`snapshot`** prints the same live numbers as JSON — use it when you want the
   current totals yourself rather than showing the user a window. `--scope`
-  picks the window: `5m`, `15m`, `1h`, `3h`, `24h`, `today`, `session` or
-  `window`. The first five are rolling, counted back from now, so they are the
-  ones to use for "how much have I just spent".
+  picks the window: `5m`, `15m`, `1h`, `3h`, `24h`, `7d` or `all`. All but
+  `all` are rolling, counted back from now, so they are the ones to use for
+  "how much have I just spent". `all` is the total since the first recorded
+  turn of any model or tool, and its `scope_label` names that date.
 - **No Tkinter** means no panel. The script names the one install command for
   the platform; the reports are unaffected. Do not try to work around it with a
   browser page — the point of the panel is that it is not one.
@@ -78,7 +81,9 @@ Python 3.8+, standard library only. No install step, no dependencies. `run.sh` f
 | Terminal only, no file written | `token_report.py --no-html` |
 | Exclude subagent turns | `token_report.py --no-subagents` |
 
-`--group-by` accepts `day`, `model`, `surface`, `session`, `project`, `skill`, `plugin`, `mcp`.
+**Agents, loops, tools, harness:** every turn is attributed to its agent: the main agent, a subagent type such as `Explore`, or a Copilot mode (`--group-by agent`). It is also attributed to its **loop**: one user prompt and every model call it triggered, subagents included. The dashboard lists the heaviest loops (model calls, tool calls, subagents, run time, cost), every **tool called** including MCP tools, and **harness overhead**: setup tokens per session, the share of what's read that is re-sent history, and Copilot's split by prompt part. Agents the user built themselves are traced with `scripts/agent_tracer.py`, which logs to `~/.claude/token-tracker/agents/` and shows as `Custom agent · <app>`. Suggest it when the user asks about tracking their own agent.
+
+`--group-by` accepts `day`, `model`, `app` (Claude Code / Cowork / Copilot / Custom agent), `surface`, `mode` (Copilot agent / ask / edit and chat location), `session`, `project`, `skill`, `plugin`, `mcp`.
 
 The dashboard is written to `~/.claude/token-report.html` unless `--out` says otherwise. It is a single self-contained file with no external requests.
 
@@ -102,7 +107,8 @@ The "saved by caching" figure is what the cache reads would have cost at full in
 
 - **Nothing found** — the transcript directory is elsewhere. Pass `--root /path/to/projects`, or set `CLAUDE_CONFIG_DIR`. Both tools take `--root`.
 - **The panel shows nothing** — no turn has landed since it opened and none exists in the window it holds. `python3 tokenwatch.py status` says what it is watching and how many transcripts it found.
-- **A model shows no cost** — it is missing from `pricing.json`. Its tokens still count. Add the model's rates to the file; the script reads it at runtime.
+- **A cost shows "—", or a total ends in "+"** — no live source publishes a rate for that model or tier yet (for example, a model released hours ago, or fast mode on a model that doesn't offer it). Its tokens still count. Never fill in a guessed cost. The cost appears once the price lists include it. To price it now, add its rates to `~/.claude/token-tracker/pricing.json`.
+- **Every cost shows "—"** — the price lists have never been downloaded, because the machine is offline or `TOKEN_TRACKER_OFFLINE=1` is set. `--json` reports `pricing_fetched`.
 - **Totals differ from Settings → Usage** — expected. The web and mobile surfaces are absent here, subscription billing is not per-token, and this tool prices at public list rates.
 - **A number climbed while you watched** — transcripts are appended live, so a running session grows between runs.
 
@@ -110,4 +116,4 @@ Duplicate log entries for the same API request are charged once, keyed on `reque
 
 ## Keeping prices current
 
-`scripts/pricing.json` records the date it was checked. If it is stale, refresh it from the published pricing page and update `_checked`. Never guess at a rate — an unknown model priced at zero is honest, whereas an invented rate is not.
+Nothing needs maintaining. Prices are downloaded once a day from Anthropic's pricing page and the LiteLLM list, and cached in `~/.claude/token-tracker/pricing-remote.json`. The plugin contains no price table, so a new model or a price change needs no code change. If a downloaded rate is wrong, the user can override it in `~/.claude/token-tracker/pricing.json`.

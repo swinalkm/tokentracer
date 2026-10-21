@@ -27,8 +27,8 @@ Reply in one or two lines — the panel is visual, so it speaks for itself.
 
 - Say whether it is now open or closed. Do not restate the script's output.
 - The **first** time it opens for this user, add the controls once: drag it by
-  its header, click the big number to switch between today / this session /
-  the last 7 days, right-click for the menu, `✕` to close.
+  its header, click the big number to step through 5m / 15m / 1h / 3h / 24h /
+  7d, click `all ↗` for the all-time dashboard with its calendar in the browser, right-click for the menu, `✕` to close.
 - If the script said Tkinter is unavailable, relay just the install line for
   their platform and mention that `/tokens` still reports in the terminal.
 - If it reported no transcript directory, say that `--root` or
@@ -42,5 +42,5 @@ State the coverage limit the first time only, then leave it alone: the panel
 sees the terminal CLI, the VS Code and JetBrains extensions, Cowork and the
 Agent SDK, because those write transcripts to disk. It cannot see claude.ai in
 the browser, the Claude desktop chat app, or mobile — those write no transcript
-and expose no per-conversation usage API. Cost is an estimate at list API
+and expose no per-conversation usage API. Cost is tokens × live list API
 prices, so on a subscription it reads as relative weight, not as a bill.
